@@ -1,0 +1,355 @@
+---
+title: "预测模型构建完整教程"
+author: "章仲恒"
+date: "8/10/2018"
+output: 
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: united 
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy=TRUE,echo = TRUE,
+                      prompt = T)
+```
+
+# Data generation (构建队列)
+## Training data (构建训练队列)
+```{r dataset}
+set.seed(123)
+n<-500
+age <- round(rnorm(n,70,15))
+gender<-sample(c("male",'female'),size=n,replace = T,prob = c(0.6,0.4))
+lac <- round(abs(rnorm(n,4.5,2)),1)
+type <- sample(c("surgery","emergency","medical"),size=n,replace = T,prob = c(0.3,0.4,0.3))
+vaso <- sample(c("No",'Yes'),size=n,replace = T,prob = c(0.7,0.3))
+wbc <- round(abs(rnorm(n,10,5)),1)
+crp <- round(abs(rnorm(n,150,80)),1)
+library(dummies)
+beta0=-30; betaMed=0.3
+betaSur=-3; betaAge=0.3
+betaLac=2; betaVaso=3
+betaGender=-0.1; betaWbc=-0.2
+betaCrp=0.05
+linpred <- cbind(1, dummy(type)[, -1],age,
+                 lac,dummy(vaso)[,-1],dummy(gender)[,-1],
+                 wbc,crp)%*%c(beta0,betaMed,betaSur,
+                              betaAge,betaLac,betaVaso,
+                              betaGender,betaWbc,betaCrp)
+pi <- exp(linpred) / (1 + exp(linpred))
+mort <- rbinom(n=n, size=1, prob=pi)
+lac.miss.tag<-rbinom(n, 1, 0.3)
+lac[lac<=3&lac.miss.tag==1]<-NA # NMAR
+wbc.miss.tag<-rbinom(n, 1, 0.2)
+wbc[wbc.miss.tag==1]<-NA
+crp.miss.tag<-rbinom(n, 1, 0.4)
+crp[wbc<=12&crp.miss.tag==1]<-NA # MAR
+dt <- data.frame(age,gender,lac,type,vaso,wbc,crp,mort)
+```
+## External data (外部验证队列)
+```{r external cohort}
+set.seed(1234)
+n<-200
+age <- round(rnorm(n,70,15))
+gender<-sample(c("male",'female'),size=n,replace = T,prob = c(0.6,0.4))
+lac <- round(abs(rnorm(n,4.5,2)),1)
+type <- sample(c("surgery","emergency","medical"),size=n,replace = T,prob = c(0.3,0.4,0.3))
+vaso <- sample(c("No",'Yes'),size=n,replace = T,prob = c(0.7,0.3))
+wbc <- round(abs(rnorm(n,10,5)),1)
+crp <- round(abs(rnorm(n,150,80)),1)
+library(dummies)
+beta0=-30; betaMed=0.3
+betaSur=-3; betaAge=0.3
+betaLac=2; betaVaso=3
+betaGender=-0.1; betaWbc=-0.2
+betaCrp=0.05
+linpred <- cbind(1, dummy(type)[, -1],age,
+                 lac,dummy(vaso)[,-1],dummy(gender)[,-1],wbc,
+                 crp)%*%c(beta0,betaMed,betaSur,
+                          betaAge,betaLac,betaVaso,
+                          betaGender,betaWbc,betaCrp)
+pi <- exp(linpred) / (1 + exp(linpred))
+mort <- rbinom(n=n, size=1, prob=pi)
+dt.ext <- data.frame(age,gender,lac,type,vaso,wbc,crp,mort)
+```
+## Read data from disc (从外部读取数据)
+```{r read dataset}
+dt<-read.csv("/Users/zhang/Documents/2018/R大数据实战教程/模型预测/dt.csv")
+dt.ext<-read.csv("/Users/zhang/Documents/2018/R大数据实战教程/模型预测/dtext.csv")
+```
+# Manupulation of dataframe (数据框的一般操作)
+```{r data manupulation}
+nrow(dt);
+head(dt,7);
+dt[1,2];
+dt[1:5,c("gender","wbc")];
+dt_sub1<-dt[dt$gender=="male"&dt$lac<5,]
+table(dt_sub1$gender);
+summary(dt_sub1$lac);
+dt_sub2<-dt[dt$wbc>10|dt$crp>50,]
+summary(dt_sub2[dt_sub2$crp<=50,'wbc'])
+```
+# Missing data (缺失数据初探)
+## Basic skills (R语言中缺失数据的一般处理方法)
+参考文献 Zhang Z. Missing values in big data research: some basic skills. Ann Transl Med. 2015 Dec;3(21):323. doi: 10.3978/j.issn.2305-5839.2015.12.11.
+```{r missing data}
+is.na(dt$crp[1:20])
+which(is.na(dt$crp[1:20]))
+mean(dt$crp)
+sum(dt$crp)
+mean(dt$crp,na.rm = T)
+sum(dt$crp,na.rm = T)
+complete.dt<- dt[complete.cases(dt), ]
+nrow(complete.dt)
+```
+## Missing data visulization (缺失数据的可视化)
+参考文献：Zhang Z.Missing data exploration: highlighting graphical presentation of missing pattern.Ann Transl Med. 2015 Dec;3(22):356. doi: 10.3978/j.issn.2305-5839.2015.12.28.
+```{r missing data visulization}
+library(mice);
+md.pattern(dt);
+library(VIM);
+aggr(dt, numbers = TRUE, prop=FALSE)
+marginplot(dt[c("wbc","crp")], pch=c(20),col=c("green", "red", "blue"))
+```
+  
+缺失数据的三种类型：  
+Missing completely at random (MCAR) refers to the presence of missing values on a variable that is unrelated to any other observed and unobserved variables In other words, there is no systematic reason for the missing pattern.
+
+Missing at random (MAR) is the presence of missing values on a variable that is related to other observed variables but not related to its own unobserved values.  
+
+Not missing at random (NMAR) is the presence of missing values on a variable that is neither MCAR nor MAR.      例如：乳酸正常水平的患者其乳酸会缺失。  
+
+## Single imputation (单纯插补)
+参考文献：Zhang Z. Missing data imputation: focusing on single imputation. Ann Transl Med. 2016 Jan;4(1):9. doi: 10.3978/j.issn.2305-5839.2015.12.38.
+```{r single imputation}
+lac.mean<-ifelse(is.na(dt$lac),mean(dt$lac,na.rm = T),
+                    dt$lac)
+par(mfrow=c(1,2))
+plot(1:nrow(dt),dt$lac)
+plot(1:length(lac.mean),lac.mean)
+```
+
+## Multiple imputataion (多重插补)
+参考文献：Zhang Z.Multiple imputation with multivariate imputation by chained equation (MICE) package. Ann Transl Med. 2016 Jan;4(2):30. doi: 10.3978/j.issn.2305-5839.2015.12.63.
+
+```{r multiple imputation}
+imp <- mice(dt, seed=12345)
+imp
+head(imp$imp$lac)
+dtcom<-complete(imp, action=4)
+#remove attributes to facilitate nomogram ploting
+attr(dtcom$gender, "contrasts") <- NULL
+attr(dtcom$type, "contrasts") <- NULL
+attr(dtcom$vaso, "contrasts") <- NULL
+head(dtcom)
+```
+## Estimations post-imputation (插补后的运算)
+```{r post-impute}
+ttest<-with(imp,t.test(lac~mort))
+ttest;
+fit<-with(imp,glm(mort~gender+age+lac+crp+wbc,family = binomial))
+pooled <- pool(fit);
+round(summary(pooled),2)
+fit.origin<-glm(mort~gender+age+lac+crp+wbc,family = binomial,dt)
+summary(fit.origin)
+```
+未插补的队列因为样本量较小，其置信区间较宽，不稳定。
+
+# Univariate analysis (单变量分析：构建模型的第一步)
+参考文献：  
+1、Zhang Z. Univariate description and bivariate statistical inference: the first step delving into data. Ann Transl Med. 2016 Mar;4(5):91. doi: 10.21037/atm.2016.02.11.  
+2、Zhang Z, Gayle AA, Wang J, Zhang H,Cardinal-Fernández P. Comparing baseline characteristics between groups: an introduction to the CBCgrps package. Ann Transl Med 2017;5(24):484. doi: 10.21037/atm.2017.09.39
+```{r}
+library(CBCgrps)
+tab1<-twogrps(dtcom,gvar = "mort")
+print(tab1,quote = T)
+```
+# Model training and validation (模型构建)
+## Purposeful selection (目的性建模)
+在模型中可以加入单变量分析中p<0.2-0.25的因素，另外可加入研究者认为对结局有影响的变量（有些变量单变量分析无统计学差异，但多变量分析出现差异；需要专业知识去识别）。  
+参考文献：  
+Zhang Z. Model building strategy for logistic regression: purposeful selection. Ann Transl Med 2016;4(6):111. doi: 10.21037/atm.2016.02.15
+```{r}
+mod1<-glm(mort~age+lac+wbc+crp+type+vaso,dtcom,
+          family = "binomial")
+summary(mod1)
+mod2<-glm(mort~age+lac+crp+type+vaso,dtcom,family = "binomial")
+summary(mod2)
+delta.coef<-abs((coef(mod2)-coef(mod1)[-4])/coef(mod1)[-4])
+round(delta.coef,3)
+```
+## Comparing two models (比较两个模型的优劣)
+```{r}
+library(lmtest)
+lrtest(mod1,mod2)
+ anova(mod1,mod2,test="Chisq")
+```
+
+## Linearity assumption (线性假设验证)
+方法：residuals versus individual independent variables.  
+参考文献：Zhang Z. Residuals and regression diagnostics: focusing on logistic regression. Ann Transl Med. 2016 May;4(10):195. doi: 10.21037/atm.2016.03.36.
+```{r}
+library(car)
+residualPlots(mod1,terms=~age+lac+wbc+crp,fitted=T)
+```  
+
+```{r}
+mod3<-glm(mort~age+I(age^2)+lac+crp+type+vaso,
+          dtcom,family = "binomial")
+lrtest(mod2,mod3)
+```
+
+## Interaction (交互作用探讨)
+```{r}
+model.interaction<-glm(mort~age+lac*vaso+wbc+crp+type,
+                       data=dtcom,family = binomial)
+summary(model.interaction)
+lrtest(mod1,model.interaction)
+```
+## Visulization of interaction (交互作用的可视化)
+```{r}
+library(visreg)
+visreg(model.interaction,xvar="lac",by="vaso",scale="response")
+```
+
+## Model fit (模型拟合的判断)
+```{r}
+library(ResourceSelection)
+hoslem.test(mod1$y, fitted(mod1))
+Predprob<-predict(mod1,type="response")
+plot(Predprob,jitter(as.numeric(dtcom$mort),0.5),
+     cex=0.5,ylab="Jittered mortality outcome")
+  library(lattice)
+ histogram(~Predprob|dtcom$mort)
+ library(pROC);
+ plot.roc(roc(dtcom$mort,Predprob),print.auc=TRUE)
+```
+
+## Make table 2(模型制表表示)
+```{r table 2, warning=FALSE}
+tab2<-cbind(paste(round(exp(coef(mod1)),3),'(',
+            round(exp(confint(mod1))[,1],3),'~',
+            round(exp(confint(mod1))[,2],3),')',sep = ""),
+            round(summary(mod1)$coefficient[,4],3))
+tab2
+```
+
+## Net reclassification improvement
+Net reclassification improvement (NRI) is an index that attempts to quantify how well a new model reclassifies subjects - either appropriately or inappropriately - as compared to an old model.How well a new model correctly reclassifies cases, was introduced through the metric of NRI.  
+一些重要概念:  
+
+$$
+\begin{aligned}
+  NRI=\frac{\sum_{i\ in\ events} v(i)}{events(n)}-\frac{\sum_{i\ in\ nonevents} v(j)}{nonevents(n)}
+\end{aligned}
+$$
+$v(i)$为移动标示，向上移动时$v(i)=1$,向下移动时$v(i)=-1$，不动时$v(i)=0$。当风险划分为有限几个区域时，称为分类的NRI；当不分类，即每个病人自身的风险为一个作为一个类别时，称为连续的NRI。    
+
+解释NRI的示意图: ![](/Users/zhang/Documents/2018/R大数据实战教程/模型预测/Reclassification_table_example.gif)
+
+In a perfect test, all subjects with events would be classified as abnormal and all subjects without events would be classified as normal. Bold indicates subjects correctly classified by both tests. White indicates subjects incorrectly classified by both tests. Green indicates subjects correctly reclassified by test 2. Red indicates subjects incorrectly reclassified by test 2.  
+
+$$
+\begin{aligned}
+  \hat{IDI}=\frac{\sum_{i\ in\ events} (\hat{p}_{new}(i)-\hat{p}_{old}(i))}{events(n)}-\frac{\sum_{i\ in\ nonevents} (\hat{p}_{new}(j)-\hat{p}_{old}(j))}{nonevents(n)}
+\end{aligned}
+$$
+
+> We show in the Appendix that **the first term** in (2) quantifies **improvement in sensitivity** and the negative of the second term quantifies **improvement in specificity**. Also, by rearranging the terms in (2), we observe that it is equivalent to the difference in discrimination slopes as introduced by Yates (*discrimination slope can be defined as a difference between mean predicted probabilities of an event for those with events and the corresponding mean for those without events*).
+
+> The difference in model-based discrimination slopes is an important measure of improvement in model performance. As shown in the Appendix, it is a sample equivalent of the difference between the *integrated difference in sensitivities and the integrated difference in ‘one minus specificities’ between the new and old models*. This integration is over all possible cut-offs. Thus, it quantifies jointly the **overall improvement in sensitivity and specificity**. In simpler terms, the area under the sensitivity curve is estimated by the mean of predicted probabilities of an event for those who experience events, and the area under the ‘one minus specificity’ curve is estimated by the mean of predicted probabilities of an event for those who do not experience events. We suggest the integrated differences in sensitivities and ‘one minus specificities’ and their difference as another measure of improvement in performance offered by the new marker. We call the last difference the **IDI** and estimate it using *the difference in discrimination slopes*. A simple asymptotic test of significance is provided in the next section.
+
+参考文献：  
+Ann Intern Med. 2014;160(2):122-131.   
+Statist. Med. 2008; 27:157–172.  
+
+```{r}
+library(PredictABEL);
+riskmod1<-fitLogRegModel(data=dtcom, cOutcome=8, cNonGenPreds=c(1),
+                         cNonGenPredsCat=c(2), 
+                         cGenPreds=c(0), cGenPredsCat=c(0))
+riskmod2<-fitLogRegModel(data=dtcom, cOutcome=8,    
+                         cNonGenPreds=c(1,3,6,7),
+                         cNonGenPredsCat=c(2,4,5), 
+                         cGenPreds=c(0), cGenPredsCat=c(0))
+predrisk1<-predRisk(riskmod1, data=dtcom)
+predrisk2<-predRisk(riskmod2, data=dtcom)
+reclassification(data=dtcom, cOutcome=8, predrisk1, predrisk2, cutoff=c(0,.20,.30,1))
+#plot ROC curve for both models
+plotROC(data=dtcom, cOutcome=8, predrisk=cbind(predrisk1, predrisk2), 
+        labels=c("simple","full"), 
+        plottitle="ROC plots for mortality discrimination")
+#Box Plots Of Predicted Risks Separately For Individuals With And Without The Outcome Of Interest.
+plotDiscriminationBox(data=dtcom, cOutcome=8, 
+                      predrisk=predrisk1, 
+        labels=c("without event","with event"), 
+        plottitle="Box plots for mortality discrimination")
+plotDiscriminationBox(data=dtcom, cOutcome=8, 
+                      predrisk=predrisk2, 
+        labels=c("without event","with event"), 
+        plottitle="Box plots for mortality discrimination")
+```
+两个模型Discrimination slope的差值等于IDI，其中:   
+
+> **discrimination slope** can be defined as a difference between mean predicted probabilities of an event for those with events and the corresponding mean for those without events
+```{r calibration plot}
+#calibration plot
+plotCalibration(data=dtcom, cOutcome=8, predrisk1, groups=15,
+                plottitle="Calibration plot for model 1")
+plotCalibration(data=dtcom, cOutcome=8, predrisk2, groups=15,
+                plottitle="Calibration plot for model 2")
+```
+
+## Model recalibration (利用外部数据进行模型重新校正)
+参考文献：BMC Med Res Methodol. 2012 Jul 20;12:99. doi: 10.1186/1471-2288-12-99.
+```{r}
+Provalid<-predict(mod1,newdata = dt.ext)
+modvalid<-glm(dt.ext$mort~Provalid,
+          family = "binomial")
+coeff.recal<-coefficients(mod1)*coefficients(modvalid)[2]#shrinkage factor
+coeff.recal
+coefficients(mod1)#校正后的模型相对保守。
+```
+
+## Decision curve analysis
+一些重要概念：  
+
+$$
+\begin{aligned}
+ Net\ benefit\ treated=\frac{TP}{n}-\frac{FP}{n}(\frac{p_t}{1-p_t})
+\end{aligned}
+$$
+  
+>where TP and FP are true positive count and false positive count, respectively; n is the number of subjects; and $p_t$ is the threshold probability. A model is said to be superior to another at the chosen threshold probability $p_t$ if its net benefit surpasses the net benefit of the other model for that value of $p_t$.
+
+参考文献： Zhang Z, Rousson V, Lee WC, Ferdynus C, Chen M, Qian X, Guo Y; written on behalf of AME BigData Clinical Trial Collaborative Group. Decision curve analysis: a technical note. Ann Transl Med 2018. doi: 10.21037/atm.2018.07.02
+```{r DCA, warning=FALSE}
+library(rmda)
+mod1.dca<-decision_curve(mort~age+lac+wbc+crp+type+vaso,data=dtcom,
+          study.design = "cohort",policy = "opt-in",bootstraps = 150)
+mod2.dca<-decision_curve(mort~age+vaso,data=dtcom,
+          study.design = "cohort",policy = "opt-in",bootstraps = 150)  
+plot_decision_curve(list(mod1.dca, mod2.dca),
+curve.names = c("mod1", "mod2"),
+xlim = c(0, 1),
+legend.position = "bottomleft")
+```
+
+## Nomogram (模型的可视化——列线图)
+参考文献：Zhang Z, Kattan MW. Drawing Nomograms with R: applications to categorical outcome and survival data. Ann Transl Med. 2017 May;5(10):211. doi: 10.21037/atm.2017.04.01.
+```{r}
+library(regplot)
+regplot(mod1,droplines = T, 
+        observation = dtcom[3,],interval="confidence")
+```
+
+
+
+
+
+
+
